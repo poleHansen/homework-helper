@@ -1,0 +1,13 @@
+# Frontend
+/node_modules/
+/dist/
+
+# Python
+/.venv/
+/.pytest_cache/
+__pycache__/
+*.py[cod]
+/homework_helper.egg-info/
+
+# Local configuration
+/.env
