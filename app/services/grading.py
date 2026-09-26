@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,10 @@ from .files import extract_archive, read_submission, student_name, write_reviewe
 
 SYSTEM_PROMPT = """你是一名严谨的教师批改助手。
 你必须严格按照评分标准批改，不得自行增加评分标准。
+总分必须使用评分规则提供的总分，不要根据学生表现自行改变总分。
+每个扣分项必须填写学生作业中的可直接匹配的连续短语作为 evidence，不得填写“缺少内容”“命名混乱”等不存在于原文的概括词。
+question 必须填写题号或作业中实际存在的标题、段落位置。
+JSON 字符串中的反斜杠必须写成双反斜杠，例如公式中的 \\theta 必须输出为 \\\\theta。
 只输出合法 JSON，不要输出 Markdown，不要输出额外说明。
 JSON 格式：
 {
@@ -31,13 +36,91 @@ JSON 格式：
 }"""
 
 
+def extract_max_score(rubric: str) -> int | float:
+    patterns = (
+        r"(?:总分|满分)\s*(?:为|是|：|:)?\s*(\d+(?:\.\d+)?)\s*分?",
+        r"(?:合计|共计)\s*(\d+(?:\.\d+)?)\s*分",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, rubric, re.IGNORECASE)
+        if match:
+            value = float(match.group(1))
+            return int(value) if value.is_integer() else value
+    return 100
+
+
 def parse_response(content: str) -> dict[str, Any]:
     text = content.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    result = json.loads(text)
+    try:
+        result = json.loads(_repair_invalid_json_escapes(text))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"模型返回的 JSON 无法解析：{error.msg}") from error
     if not isinstance(result, dict):
         raise ValueError("模型返回的结果不是 JSON 对象")
+    return result
+
+
+def _repair_invalid_json_escapes(text: str) -> str:
+    simple_escapes = {'"', "\\", "/"}
+    control_escapes = {"b", "f", "n", "r", "t"}
+    repaired: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == '"' and (index == 0 or text[index - 1] != "\\"):
+            in_string = not in_string
+            repaired.append(character)
+            index += 1
+            continue
+        if in_string and character == "\\":
+            next_character = text[index + 1] if index + 1 < len(text) else ""
+            following_character = text[index + 2] if index + 2 < len(text) else ""
+            if next_character in simple_escapes:
+                repaired.extend((character, next_character))
+                index += 2
+                continue
+            if next_character in control_escapes:
+                if "A" <= following_character <= "Z" or "a" <= following_character <= "z":
+                    repaired.extend(("\\\\", next_character))
+                else:
+                    repaired.extend((character, next_character))
+                index += 2
+                continue
+            if next_character == "u":
+                unicode_digits = text[index + 2 : index + 6]
+                if len(unicode_digits) == 4 and all(
+                    character in "0123456789abcdefABCDEF" for character in unicode_digits
+                ):
+                    repaired.extend((character, next_character, unicode_digits))
+                    index += 6
+                    continue
+            repaired.extend(("\\\\", next_character))
+            index += 2
+            continue
+        repaired.append(character)
+        index += 1
+    return "".join(repaired)
+
+
+def calculate_score(result: dict[str, Any], max_score: int | float | None = None) -> dict[str, Any]:
+    max_score = max_score if max_score is not None else result.get("max_score")
+    if max_score is None:
+        raise ValueError("评分规则缺少总分")
+    try:
+        max_value = float(max_score)
+        deduction_total = sum(
+            max(0.0, float(deduction.get("points") or 0))
+            for deduction in result.get("deductions", [])
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("模型结果中的总分或扣分不是数字") from error
+
+    score = max(0.0, min(max_value, max_value - deduction_total))
+    result["max_score"] = int(max_value) if max_value.is_integer() else max_value
+    result["score"] = int(score) if score.is_integer() else score
     return result
 
 
@@ -143,9 +226,12 @@ async def grade_submission(submission_id: int, rubric: str, content: str, image_
         connection.execute(
             "UPDATE submissions SET status = 'grading', updated_at = ? WHERE id = ?",
             (db.now(), submission_id),
-        )
+    )
     try:
-        result = await call_model(rubric, content, image_data_url)
+        result = calculate_score(
+            await call_model(rubric, content, image_data_url),
+            extract_max_score(rubric),
+        )
         with db.connect() as connection:
             submission = connection.execute(
                 "SELECT source_path FROM submissions WHERE id = ?", (submission_id,)

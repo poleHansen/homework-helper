@@ -16,3 +16,4 @@ __pycache__/
 
 # Runtime data
 /data/
+data/homework.db
