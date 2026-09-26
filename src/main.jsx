@@ -8,10 +8,12 @@ import {
   Col,
   ConfigProvider,
   Descriptions,
+  Divider,
   Empty,
   Flex,
   Form,
   Input,
+  InputNumber,
   Layout,
   List,
   Modal,
@@ -27,6 +29,9 @@ import {
 } from "antd";
 import {
   CloudUploadOutlined,
+  DeleteOutlined,
+  DownloadOutlined,
+  EditOutlined,
   FileTextOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -184,10 +189,18 @@ function AppShell() {
 
   async function saveRubric(values) {
     try {
+      const ruleFile = values.rule_file?.[0]?.originFileObj;
+      if (!ruleFile) {
+        message.warning("请选择评分规则文件");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("name", values.name);
+      formData.append("description", values.description || "");
+      formData.append("rule_file", ruleFile);
       const rubric = await request("/api/rubrics", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
+        body: formData,
       });
       setRubricOpen(false);
       rubricForm.resetFields();
@@ -336,7 +349,7 @@ function AppShell() {
                   <Text className="eyebrow">新建批次</Text>
                   <Title level={4}>上传全班作业</Title>
                 </div>
-                <Tag icon={<CloudUploadOutlined />}>ZIP 文件</Tag>
+                <Tag icon={<CloudUploadOutlined />}>DOCX 压缩包</Tag>
               </Flex>
               <Form form={batchForm} layout="vertical" onFinish={createBatch}>
                 {uploadStage && <Alert type={uploadStage.startsWith("建立批次失败") ? "error" : "info"} showIcon message={uploadStage} style={{ marginBottom: 18 }} />}
@@ -368,7 +381,7 @@ function AppShell() {
                   <Upload.Dragger accept=".zip" maxCount={1} beforeUpload={() => false} showUploadList>
                     <p className="ant-upload-drag-icon"><CloudUploadOutlined /></p>
                     <p className="ant-upload-text">点击或拖拽 ZIP 文件到这里</p>
-                    <p className="ant-upload-hint">支持按学生文件名归档的 PDF、DOCX、图片和文本作业</p>
+                  <p className="ant-upload-hint">压缩包内请放入每位学生的一份 DOCX 作业</p>
                   </Upload.Dragger>
                 </Form.Item>
                 <Button type="primary" htmlType="submit" size="large" icon={<UploadOutlined />} loading={loading}>
@@ -388,7 +401,7 @@ function AppShell() {
               <Table rowKey="id" columns={batchColumns} dataSource={batches} pagination={false} locale={{ emptyText: "上传第一批作业后，处理进度会显示在这里" }} />
             </Card>
 
-            {selectedBatch && <BatchDetail batch={selectedBatch} />}
+            {selectedBatch && <BatchDetail batch={selectedBatch} onRefresh={() => openBatch(selectedBatch.id)} />}
           </div>
         </Content>
       </Layout>
@@ -407,8 +420,16 @@ function AppShell() {
           <Form.Item label="说明" name="description">
             <Input placeholder="适用年级或题型" />
           </Form.Item>
-          <Form.Item label="评分细则" name="content" rules={[{ required: true, message: "请输入评分细则" }]}>
-            <Input.TextArea rows={7} placeholder="请按题目、得分点、扣分规则写清楚。" />
+          <Form.Item
+            label="评分规则文件"
+            name="rule_file"
+            valuePropName="fileList"
+            getValueFromEvent={(event) => event?.fileList || []}
+            rules={[{ required: true, message: "请选择评分规则文件" }]}
+          >
+            <Upload beforeUpload={() => false} maxCount={1} accept=".docx,.txt,.md">
+              <Button icon={<UploadOutlined />}>选择 DOCX、TXT 或 Markdown</Button>
+            </Upload>
           </Form.Item>
           <Flex justify="end" gap={10}>
             <Button onClick={() => { setRubricOpen(false); rubricForm.resetFields(); }}>取消</Button>
@@ -454,14 +475,70 @@ function AppShell() {
   );
 }
 
-function BatchDetail({ batch }) {
+function BatchDetail({ batch, onRefresh }) {
+  const { message } = App.useApp();
   const errors = batch.summary?.common_errors || [];
+  const [reviewing, setReviewing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [reviewForm] = Form.useForm();
+
+  function openReview(item) {
+    setReviewing(item);
+    reviewForm.setFieldsValue({
+      score: item.score,
+      teacher_comment: item.result?.teacher_comment || "",
+      deductions: item.result?.deductions || [],
+    });
+  }
+
+  async function saveReview(values) {
+    setSaving(true);
+    try {
+      await request(`/api/submissions/${reviewing.id}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      });
+      setReviewing(null);
+      await onRefresh();
+      message.success("批改结果已保存到 Word");
+    } catch (error) {
+      message.error(error.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const columns = [
     { title: "学生", dataIndex: "student_name" },
     { title: "文件", dataIndex: "filename", ellipsis: true },
     { title: "状态", dataIndex: "status", render: (status) => <Tag color={statusColor(status)}>{statusText[status] || status}</Tag> },
     { title: "错误", dataIndex: "error", ellipsis: true, render: (error) => error ? <Text type="danger" title={error}>{error}</Text> : "—" },
     { title: "得分", render: (_, item) => item.score == null ? "—" : `${item.score}${item.max_score ? ` / ${item.max_score}` : ""}` },
+    {
+      title: "操作",
+      fixed: "right",
+      render: (_, item) => (
+        <Space>
+          <Button
+            type="link"
+            icon={<EditOutlined />}
+            disabled={!["completed", "reviewed"].includes(item.status)}
+            onClick={() => openReview(item)}
+          >
+            批改
+          </Button>
+          <Button
+            type="link"
+            icon={<DownloadOutlined />}
+            disabled={!["completed", "reviewed"].includes(item.status)}
+            href={`/api/submissions/${item.id}/file`}
+          >
+            下载
+          </Button>
+        </Space>
+      ),
+    },
   ];
   return (
     <Card className="detail-card" bordered={false}>
@@ -470,7 +547,16 @@ function BatchDetail({ batch }) {
           <Text className="eyebrow">批次详情</Text>
           <Title level={4}>{batch.name}</Title>
         </div>
-        <Tag color={statusColor(batch.status)}>{statusText[batch.status] || batch.status}</Tag>
+        <Space>
+          <Button
+            icon={<DownloadOutlined />}
+            disabled={!batch.submissions.some((item) => ["completed", "reviewed"].includes(item.status))}
+            href={`/api/batches/${batch.id}/download`}
+          >
+            全部下载
+          </Button>
+          <Tag color={statusColor(batch.status)}>{statusText[batch.status] || batch.status}</Tag>
+        </Space>
       </Flex>
       <Row gutter={14} className="detail-stats">
         <Col xs={24} sm={12} md={8}><Card size="small"><Statistic title="作业总数" value={batch.total} /></Card></Col>
@@ -481,7 +567,62 @@ function BatchDetail({ batch }) {
       <Progress percent={batch.total ? Math.round(((batch.completed + batch.failed) / batch.total) * 100) : 0} status={batch.failed ? "exception" : undefined} />
       <Title level={5}>共性问题</Title>
       <Space wrap>{errors.length ? errors.map((item) => <Tag key={item.category} color="orange">{item.category} · {item.count} 次</Tag>) : <Text type="secondary">完成批改后，这里会出现高频错误。</Text>}</Space>
-      <Table className="submission-table" rowKey="id" columns={columns} dataSource={batch.submissions} pagination={false} scroll={{ x: 620, y: 320 }} />
+      <Table className="submission-table" rowKey="id" columns={columns} dataSource={batch.submissions} pagination={false} scroll={{ x: 880, y: 320 }} />
+      <Modal
+        title={<div><Text type="secondary">教师复核</Text><Title level={4} style={{ margin: "4px 0 0" }}>{reviewing?.student_name}</Title></div>}
+        open={Boolean(reviewing)}
+        onCancel={() => setReviewing(null)}
+        footer={null}
+        width={720}
+        destroyOnHidden
+      >
+        <Form form={reviewForm} layout="vertical" onFinish={saveReview} className="review-form">
+          <Flex gap={14}>
+            <Form.Item label="最终得分" name="score" rules={[{ required: true, message: "请输入最终得分" }]} style={{ width: 180 }}>
+              <InputNumber min={0} max={reviewing?.max_score} precision={2} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item label="原文件" style={{ flex: 1 }}>
+              <Button icon={<DownloadOutlined />} href={reviewing ? `/api/submissions/${reviewing.id}/file` : undefined}>
+                下载当前 Word
+              </Button>
+            </Form.Item>
+          </Flex>
+          <Divider orientation="left">扣分项</Divider>
+          <Form.List name="deductions">
+            {(fields, { add, remove }) => (
+              <Flex vertical gap={10}>
+                {fields.map(({ key, name, ...restField }) => (
+                  <Card key={key} size="small" className="deduction-editor">
+                    <Flex gap={8} align="start">
+                      <Form.Item {...restField} name={[name, "question"]} label="题号/位置" style={{ width: 130 }}>
+                        <Input placeholder="第 1 题" />
+                      </Form.Item>
+                      <Form.Item {...restField} name={[name, "points"]} label="扣分" style={{ width: 90 }}>
+                        <InputNumber min={0} precision={2} style={{ width: "100%" }} />
+                      </Form.Item>
+                      <Form.Item {...restField} name={[name, "reason"]} label="扣分原因" style={{ flex: 1 }}>
+                        <Input placeholder="说明错误和扣分依据" />
+                      </Form.Item>
+                      <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                    </Flex>
+                    <Form.Item {...restField} name={[name, "evidence"]} label="原文证据" style={{ marginBottom: 0 }}>
+                      <Input placeholder="可选，填写作业中的对应内容" />
+                    </Form.Item>
+                  </Card>
+                ))}
+                <Button onClick={() => add({ points: 0 })}>新增扣分项</Button>
+              </Flex>
+            )}
+          </Form.List>
+          <Form.Item label="教师评语" name="teacher_comment" style={{ marginTop: 18 }}>
+            <Input.TextArea rows={3} placeholder="可选，补充给学生的反馈" />
+          </Form.Item>
+          <Flex justify="end" gap={10}>
+            <Button onClick={() => setReviewing(null)}>取消</Button>
+            <Button type="primary" htmlType="submit" loading={saving}>保存并写回 Word</Button>
+          </Flex>
+        </Form>
+      </Modal>
     </Card>
   );
 }

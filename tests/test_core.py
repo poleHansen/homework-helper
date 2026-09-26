@@ -2,7 +2,10 @@ import json
 import zipfile
 from pathlib import Path
 
+from docx import Document
+
 from app.services.files import extract_archive, safe_member_path, student_name
+from app.services.files import REVIEW_MARKER, write_reviewed_docx
 from app.services.grading import parse_response, summarize
 from app import db
 
@@ -47,3 +50,33 @@ def test_settings_round_trip(tmp_path, monkeypatch):
         "model": "test/model",
         "concurrency": "4",
     }
+
+
+def test_write_reviewed_docx_replaces_previous_review(tmp_path: Path):
+    path = tmp_path / "student.docx"
+    document = Document()
+    document.add_paragraph("学生原文答案")
+    document.save(path)
+
+    write_reviewed_docx(
+        path,
+        8,
+        10,
+        [{"question": "第1题", "points": 2, "reason": "概念遗漏", "evidence": "未写定义"}],
+        ["请补充关键定义"],
+    )
+    write_reviewed_docx(
+        path,
+        9,
+        10,
+        [{"question": "第2题", "points": 1, "reason": "计算错误"}],
+    )
+
+    result = Document(path)
+    paragraphs = result.paragraphs
+    assert paragraphs[0].text == "学生原文答案"
+    assert sum(item.text == REVIEW_MARKER for item in paragraphs) == 1
+    assert "最终得分：9 / 10" in [item.text for item in paragraphs]
+    assert "第2题：扣分 1 分：计算错误" in [item.text for item in paragraphs]
+    assert "第1题" not in "\n".join(item.text for item in paragraphs)
+    assert paragraphs[-1].runs[0].font.color.rgb is not None

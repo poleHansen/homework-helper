@@ -1,16 +1,20 @@
 import asyncio
+import io
 import json
 from pathlib import Path
+import tempfile
+from urllib.parse import quote
+import zipfile
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import db
 from .config import DATA_DIR, UPLOAD_DIR
-from .services.files import archive_name
+from .services.files import archive_name, read_rubric, write_reviewed_docx
 from .services.grading import (
     mark_batch_failed,
     model_settings,
@@ -27,15 +31,10 @@ templates = Jinja2Templates(directory="templates")
 running_tasks: set[asyncio.Task] = set()
 
 
-class RubricCreate(BaseModel):
-    name: str
-    description: str = ""
-    content: str
-
-
 class ReviewUpdate(BaseModel):
     score: float | None = None
     teacher_comment: str = ""
+    deductions: list[dict] | None = None
 
 
 class ModelSettingsUpdate(BaseModel):
@@ -102,9 +101,25 @@ async def test_model_settings():
 
 
 @app.post("/api/rubrics")
-def create_rubric(payload: RubricCreate):
-    if not payload.name.strip() or not payload.content.strip():
+async def create_rubric(
+    name: str = Form(...),
+    description: str = Form(""),
+    rule_file: UploadFile = File(...),
+):
+    if not name.strip() or not rule_file.filename:
         raise HTTPException(status_code=400, detail="评分标准名称和内容不能为空")
+    suffix = Path(rule_file.filename).suffix.lower()
+    if suffix not in {".docx", ".txt", ".md"}:
+        raise HTTPException(status_code=400, detail="评分规则只支持 DOCX、TXT 或 Markdown 文件")
+    with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=suffix, delete=False) as temporary:
+        rubric_path = Path(temporary.name)
+    try:
+        rubric_path.write_bytes(await rule_file.read())
+        content = read_rubric(rubric_path)
+    finally:
+        rubric_path.unlink(missing_ok=True)
+    if not content:
+        raise HTTPException(status_code=400, detail="评分规则文件不能为空")
     timestamp = db.now()
     with db.connect() as connection:
         cursor = connection.execute(
@@ -112,7 +127,7 @@ def create_rubric(payload: RubricCreate):
             INSERT INTO rubrics (name, description, content, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (payload.name.strip(), payload.description.strip(), payload.content.strip(), timestamp, timestamp),
+            (name.strip(), description.strip(), content, timestamp, timestamp),
         )
         rubric_id = cursor.lastrowid
         row = connection.execute("SELECT * FROM rubrics WHERE id = ?", (rubric_id,)).fetchone()
@@ -209,30 +224,95 @@ async def create_batch(
 def review_submission(submission_id: int, payload: ReviewUpdate):
     with db.connect() as connection:
         row = connection.execute(
-            "SELECT result_json FROM submissions WHERE id = ?", (submission_id,)
+            "SELECT result_json, source_path, score, max_score FROM submissions WHERE id = ?",
+            (submission_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="作业不存在")
+        if Path(row["source_path"]).suffix.lower() != ".docx":
+            raise HTTPException(status_code=400, detail="当前只支持复核 Word 作业")
         result = db.decode_json(row["result_json"], {})
+        score = payload.score if payload.score is not None else row["score"]
+        deductions = payload.deductions if payload.deductions is not None else result.get("deductions", [])
+        previous_teacher_comment = result.get("teacher_comment", "")
         result["reviewed"] = True
         result["teacher_comment"] = payload.teacher_comment
+        result["deductions"] = deductions
+        comments = list(result.get("comments", []))
+        if previous_teacher_comment:
+            comments = [comment for comment in comments if comment != previous_teacher_comment]
+        if payload.teacher_comment.strip():
+            comments.append(payload.teacher_comment.strip())
+        result["comments"] = comments
+        try:
+            write_reviewed_docx(
+                Path(row["source_path"]),
+                score,
+                result.get("max_score", row["max_score"]),
+                deductions,
+                comments,
+            )
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"写回 Word 失败：{error}") from error
         connection.execute(
             """
-            UPDATE submissions SET status = 'reviewed', score = COALESCE(?, score),
+            UPDATE submissions SET status = 'reviewed', score = ?,
             result_json = ?, updated_at = ? WHERE id = ?
             """,
-            (payload.score, json.dumps(result, ensure_ascii=False), db.now(), submission_id),
+            (score, json.dumps(result, ensure_ascii=False), db.now(), submission_id),
         )
-    return {"status": "reviewed"}
+    return {"status": "reviewed", "score": score, "result": result}
 
 
 @app.get("/api/submissions/{submission_id}/file")
 def submission_file(submission_id: int):
     with db.connect() as connection:
         row = connection.execute(
-            "SELECT source_path, filename FROM submissions WHERE id = ?",
+            "SELECT source_path, filename, status FROM submissions WHERE id = ?",
             (submission_id,),
         ).fetchone()
-    if not row or not Path(row["source_path"]).exists():
+    if not row or row["status"] not in {"completed", "reviewed"} or not Path(row["source_path"]).exists():
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(row["source_path"], filename=row["filename"])
+
+
+@app.get("/api/batches/{batch_id}/download")
+def batch_download(batch_id: int):
+    with db.connect() as connection:
+        batch = connection.execute("SELECT name FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        submissions = connection.execute(
+            """
+            SELECT filename, student_name, source_path, status
+            FROM submissions
+            WHERE batch_id = ? AND status IN ('completed', 'reviewed')
+              AND lower(filename) LIKE '%.docx'
+            ORDER BY id
+            """,
+            (batch_id,),
+        ).fetchall()
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    files = [item for item in submissions if Path(item["source_path"]).exists()]
+    if not files:
+        raise HTTPException(status_code=400, detail="暂无可下载的已批改作业")
+
+    archive = io.BytesIO()
+    used_names: set[str] = set()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+        for item in files:
+            filename = f"{item['student_name']}.docx"
+            if filename in used_names:
+                filename = item["filename"]
+            used_names.add(filename)
+            zipped.write(item["source_path"], filename)
+    archive.seek(0)
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                "attachment; "
+                f"filename*=UTF-8''{quote(archive_name(Path(batch['name'] + '.zip')))}"
+            )
+        },
+    )

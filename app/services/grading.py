@@ -6,7 +6,7 @@ from typing import Any
 
 from .. import db
 from ..config import env_model_settings
-from .files import extract_archive, read_submission, student_name
+from .files import extract_archive, read_submission, student_name, write_reviewed_docx
 
 
 SYSTEM_PROMPT = """你是一名严谨的教师批改助手。
@@ -146,6 +146,22 @@ async def grade_submission(submission_id: int, rubric: str, content: str, image_
         )
     try:
         result = await call_model(rubric, content, image_data_url)
+        with db.connect() as connection:
+            submission = connection.execute(
+                "SELECT source_path FROM submissions WHERE id = ?", (submission_id,)
+            ).fetchone()
+        if not submission:
+            raise RuntimeError("作业不存在")
+        source_path = Path(submission["source_path"])
+        if source_path.suffix.lower() == ".docx":
+            await asyncio.to_thread(
+                write_reviewed_docx,
+                source_path,
+                result.get("score"),
+                result.get("max_score"),
+                result.get("deductions", []),
+                result.get("comments", []),
+            )
         with db.connect() as connection:
             connection.execute(
                 """
