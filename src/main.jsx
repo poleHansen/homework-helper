@@ -768,7 +768,38 @@ function BatchDetail({ batch, onRefresh, onDelete, onPreview }) {
       {batch.status === "failed" && batch.summary?.error && <Alert type="error" showIcon message="批次处理失败" description={batch.summary.error} style={{ marginBottom: 18 }} />}
       <Progress percent={batch.total ? Math.round(((batch.completed + batch.failed) / batch.total) * 100) : 0} status={batch.failed ? "exception" : undefined} />
       <Title level={5}>共性问题</Title>
-      <Space wrap>{errors.length ? errors.map((item) => <Tag key={item.category} color="orange">{item.category} · {item.count} 次</Tag>) : <Text type="secondary">完成批改后，这里会出现高频错误。</Text>}</Space>
+      {errors.length ? (
+        <div className="common-errors">
+          {errors.map((item) => {
+            const example = item.examples?.[0];
+            return (
+              <div className="common-error" key={`${item.category}-${item.knowledge_point}`}>
+                <Flex justify="space-between" align="start" gap={12}>
+                  <Space wrap size={[8, 4]}>
+                    <Tag color="orange">{item.category}</Tag>
+                    <Text strong>{item.knowledge_point || item.category}</Text>
+                  </Space>
+                  <Text type="secondary" className="common-error-count">{item.count} 次</Text>
+                </Flex>
+                <Paragraph className="common-error-reason">
+                  <Text type="secondary">错误表现：</Text>
+                  {example?.reason || "未填写具体表现"}
+                  {example?.question ? `（${example.question}）` : ""}
+                </Paragraph>
+                <Paragraph className="common-error-focus">
+                  <Text strong>下节课重点：</Text>
+                  {item.teaching_focus || "结合错误题目进行针对性讲解和练习"}
+                </Paragraph>
+                {example?.evidence && (
+                  <Text type="secondary" className="common-error-evidence">
+                    作业证据：{example.evidence}
+                  </Text>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : <Text type="secondary">完成批改后，这里会出现高频错误。</Text>}
       <Table className="submission-table" rowKey="id" columns={columns} dataSource={batch.submissions} pagination={false} scroll={{ x: 880, y: 320 }} />
       <Modal
         title={<div><Text type="secondary">教师复核</Text><Title level={4} style={{ margin: "4px 0 0" }}>{reviewing?.student_name}</Title></div>}

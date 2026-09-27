@@ -36,11 +36,30 @@ def test_parse_and_summarize():
     result = parse_response(json.dumps({
         "score": 8,
         "max_score": 10,
-        "deductions": [{"category": "概念遗漏", "reason": "缺少定义域"}],
+        "deductions": [{
+            "category": "概念理解",
+            "knowledge_point": "函数定义域",
+            "reason": "缺少定义域",
+            "teaching_focus": "重点讲解函数定义域的判断方法",
+            "question": "第1题",
+            "evidence": "未写定义域",
+        }],
     }))
     summary = summarize([result, result])
     assert result["score"] == 8
-    assert summary["common_errors"][0] == {"category": "概念遗漏", "count": 2}
+    assert summary["common_errors"][0]["category"] == "概念理解"
+    assert summary["common_errors"][0]["knowledge_point"] == "函数定义域"
+    assert summary["common_errors"][0]["count"] == 2
+    assert summary["common_errors"][0]["teaching_focus"] == "重点讲解函数定义域的判断方法"
+    assert summary["common_errors"][0]["examples"][0]["evidence"] == "未写定义域"
+
+
+def test_summarize_falls_back_for_legacy_deductions():
+    summary = summarize([{
+        "deductions": [{"category": "命名混乱", "reason": "变量名未体现含义"}],
+    }])
+    assert summary["common_errors"][0]["knowledge_point"] == "变量名未体现含义"
+    assert summary["common_errors"][0]["count"] == 1
 
 
 def test_parse_response_repairs_invalid_backslash_escapes():

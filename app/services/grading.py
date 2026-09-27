@@ -15,6 +15,9 @@ SYSTEM_PROMPT = """你是一名严谨的教师批改助手。
 总分必须使用评分规则提供的总分，不要根据学生表现自行改变总分。
 每个扣分项必须填写学生作业中的可直接匹配的连续短语作为 evidence，不得填写“缺少内容”“命名混乱”等不存在于原文的概括词。
 question 必须填写题号或作业中实际存在的标题、段落位置。
+category 用于概括错误类型，例如“概念理解”“算法实现”“代码规范”。
+knowledge_point 必须填写具体的可教学知识点，例如“循环边界条件判断”“递归终止条件”“Python 模块导入语法”，不得只写“原理描述不准确”“命名混乱”等笼统表述。
+teaching_focus 必须说明下节课应重点讲什么，结合该学生的实际错误给出可执行的讲解方向，不要只写“加强学习”。
 JSON 字符串中的反斜杠必须写成双反斜杠，例如公式中的 \\theta 必须输出为 \\\\theta。
 只输出合法 JSON，不要输出 Markdown，不要输出额外说明。
 JSON 格式：
@@ -26,7 +29,9 @@ JSON 格式：
       "question": "题号或位置",
       "points": 数字,
       "category": "错误分类",
+      "knowledge_point": "具体知识点",
       "reason": "不超过50字的扣分原因",
+      "teaching_focus": "下节课重点讲解内容",
       "evidence": "学生答案中的证据"
     }
   ],
@@ -201,18 +206,42 @@ async def test_model_connection() -> dict[str, Any]:
 
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
-    categories = Counter()
     reasons = Counter()
+    error_groups: dict[tuple[str, str], dict[str, Any]] = {}
     for result in results:
         for deduction in result.get("deductions", []):
             category = deduction.get("category", "未分类错误")
             reason = deduction.get("reason", "未填写原因")
-            categories[category] += 1
+            knowledge_point = deduction.get("knowledge_point") or reason or category
+            teaching_focus = deduction.get("teaching_focus") or f"结合错误题目讲解“{knowledge_point}”并进行针对性练习"
             reasons[reason] += 1
+            key = (category, knowledge_point)
+            group = error_groups.setdefault(
+                key,
+                {
+                    "category": category,
+                    "knowledge_point": knowledge_point,
+                    "count": 0,
+                    "teaching_focus": teaching_focus,
+                    "examples": [],
+                },
+            )
+            group["count"] += 1
+            if len(group["examples"]) < 3:
+                group["examples"].append(
+                    {
+                        "question": deduction.get("question", ""),
+                        "reason": reason,
+                        "evidence": deduction.get("evidence", ""),
+                    }
+                )
     return {
         "common_errors": [
-            {"category": key, "count": count}
-            for key, count in categories.most_common(10)
+            group
+            for group in sorted(
+                error_groups.values(),
+                key=lambda item: (-item["count"], item["category"], item["knowledge_point"]),
+            )[:10]
         ],
         "common_reasons": [
             {"reason": key, "count": count}

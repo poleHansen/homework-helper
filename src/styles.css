@@ -46,6 +46,12 @@ body { margin: 0; min-width: 320px; background: #eef2ed; }
 .detail-stats { margin-bottom: 12px; }
 .detail-stats .ant-card { background: #f7faf6; border-color: #e2eae1; }
 .detail-stats .ant-statistic-content { color: #2f6d5a; }
+.common-errors { display: grid; gap: 10px; }
+.common-error { padding: 13px 15px; border: 1px solid #e2eae1; border-left: 3px solid #d98969; background: #fbfcfa; }
+.common-error-count { white-space: nowrap; }
+.common-error-reason, .common-error-focus { margin: 9px 0 0 !important; }
+.common-error-focus { color: #2f6d5a; }
+.common-error-evidence { display: block; margin-top: 6px; overflow-wrap: anywhere; }
 .submission-table { margin-top: 22px; }
 .rubric-form { padding-top: 12px; }
 .ant-modal-content { border-radius: 14px !important; }
