@@ -1,4 +1,6 @@
 import json
+import asyncio
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from app.services.files import extract_archive, read_submission, safe_member_pat
 from app.services.files import REVIEW_ITEM_MARKER, REVIEW_MARKER, write_reviewed_docx
 from app.services.grading import calculate_score, extract_max_score, parse_response, summarize
 from app import db
+from app import main
 
 
 def test_safe_archive_and_student_name(tmp_path: Path):
@@ -109,6 +112,77 @@ def test_settings_round_trip(tmp_path, monkeypatch):
         "model": "test/model",
         "concurrency": "4",
     }
+
+
+def test_init_db_migrates_rubric_source_path(tmp_path, monkeypatch):
+    database = tmp_path / "homework.db"
+    monkeypatch.setattr(db, "DATABASE_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE rubrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    db.init_db()
+
+    with db.connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(rubrics)")}
+    assert "source_path" in columns
+
+
+def test_delete_batch_removes_records_and_files(tmp_path, monkeypatch):
+    database = tmp_path / "homework.db"
+    upload_dir = tmp_path / "uploads"
+    monkeypatch.setattr(db, "DATABASE_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "UPLOAD_DIR", upload_dir)
+    main.running_tasks.clear()
+    db.init_db()
+
+    timestamp = db.now()
+    with db.connect() as connection:
+        rubric_id = connection.execute(
+            "INSERT INTO rubrics (name, content, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("测试标准", "满分 10 分", timestamp, timestamp),
+        ).lastrowid
+        batch_id = connection.execute(
+            """
+            INSERT INTO batches
+            (name, rubric_id, rubric_snapshot, status, created_at, updated_at)
+            VALUES (?, ?, ?, 'completed', ?, ?)
+            """,
+            ("测试批次", rubric_id, "满分 10 分", timestamp, timestamp),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO submissions
+            (batch_id, filename, student_name, source_path, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'completed', ?, ?)
+            """,
+            (batch_id, "作业.docx", "张三", str(upload_dir / str(batch_id) / "作业.docx"), timestamp, timestamp),
+        )
+
+    batch_dir = upload_dir / str(batch_id)
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "作业.docx").write_text("test", encoding="utf-8")
+    (batch_dir / "archive.zip").write_text("test", encoding="utf-8")
+
+    assert asyncio.run(main.delete_batch(batch_id)) == {"status": "deleted"}
+    assert not batch_dir.exists()
+    with db.connect() as connection:
+        assert connection.execute("SELECT 1 FROM batches WHERE id = ?", (batch_id,)).fetchone() is None
+        assert connection.execute("SELECT 1 FROM submissions WHERE batch_id = ?", (batch_id,)).fetchone() is None
 
 
 def test_write_reviewed_docx_replaces_previous_review(tmp_path: Path):

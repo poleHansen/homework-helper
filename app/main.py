@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 from pathlib import Path
+import shutil
 import tempfile
 from urllib.parse import quote
 import zipfile
@@ -28,7 +29,7 @@ app = FastAPI(title="作业批改工作台")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/assets", StaticFiles(directory="static/dist/assets"), name="assets")
 templates = Jinja2Templates(directory="templates")
-running_tasks: set[asyncio.Task] = set()
+running_tasks: dict[int, asyncio.Task] = {}
 
 
 class ReviewUpdate(BaseModel):
@@ -67,6 +68,18 @@ def list_rubrics():
     with db.connect() as connection:
         rows = connection.execute("SELECT * FROM rubrics ORDER BY updated_at DESC").fetchall()
     return [db.row_to_dict(row) for row in rows]
+
+
+@app.get("/api/rubrics/{rubric_id}/file")
+def rubric_file(rubric_id: int):
+    with db.connect() as connection:
+        row = connection.execute(
+            "SELECT source_path FROM rubrics WHERE id = ?",
+            (rubric_id,),
+        ).fetchone()
+    if not row or not row["source_path"] or not Path(row["source_path"]).exists():
+        raise HTTPException(status_code=404, detail="评分标准原文件不存在")
+    return FileResponse(row["source_path"])
 
 
 @app.get("/api/settings/model")
@@ -116,22 +129,31 @@ async def create_rubric(
     try:
         rubric_path.write_bytes(await rule_file.read())
         content = read_rubric(rubric_path)
+        if not content:
+            raise HTTPException(status_code=400, detail="评分规则文件不能为空")
+        timestamp = db.now()
+        with db.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO rubrics
+                (name, description, content, source_path, created_at, updated_at)
+                VALUES (?, ?, ?, '', ?, ?)
+                """,
+                (name.strip(), description.strip(), content, timestamp, timestamp),
+            )
+            rubric_id = cursor.lastrowid
+            rubric_dir = DATA_DIR / "rubrics"
+            rubric_dir.mkdir(parents=True, exist_ok=True)
+            source_path = rubric_dir / f"{rubric_id}{suffix}"
+            rubric_path.replace(source_path)
+            connection.execute(
+                "UPDATE rubrics SET source_path = ? WHERE id = ?",
+                (str(source_path), rubric_id),
+            )
+            row = connection.execute("SELECT * FROM rubrics WHERE id = ?", (rubric_id,)).fetchone()
+        return db.row_to_dict(row)
     finally:
         rubric_path.unlink(missing_ok=True)
-    if not content:
-        raise HTTPException(status_code=400, detail="评分规则文件不能为空")
-    timestamp = db.now()
-    with db.connect() as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO rubrics (name, description, content, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (name.strip(), description.strip(), content, timestamp, timestamp),
-        )
-        rubric_id = cursor.lastrowid
-        row = connection.execute("SELECT * FROM rubrics WHERE id = ?", (rubric_id,)).fetchone()
-    return db.row_to_dict(row)
 
 
 @app.get("/api/batches")
@@ -215,9 +237,33 @@ async def create_batch(
             str(batch_dir / "files"),
         )
     )
-    running_tasks.add(task)
-    task.add_done_callback(running_tasks.discard)
+    running_tasks[batch_id] = task
+    task.add_done_callback(lambda completed: running_tasks.pop(batch_id, None))
     return {"id": batch_id, "status": "extracting"}
+
+
+@app.delete("/api/batches/{batch_id}")
+async def delete_batch(batch_id: int):
+    with db.connect() as connection:
+        batch = connection.execute("SELECT id FROM batches WHERE id = ?", (batch_id,)).fetchone()
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+
+    task = running_tasks.get(batch_id)
+    if task:
+        await asyncio.gather(task, return_exceptions=True)
+
+    batch_dir = UPLOAD_DIR / str(batch_id)
+    if batch_dir.exists():
+        try:
+            await asyncio.to_thread(shutil.rmtree, batch_dir)
+        except OSError as error:
+            raise HTTPException(status_code=500, detail=f"删除批次文件失败：{error}") from error
+
+    with db.connect() as connection:
+        connection.execute("DELETE FROM submissions WHERE batch_id = ?", (batch_id,))
+        connection.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
+    return {"status": "deleted"}
 
 
 @app.post("/api/submissions/{submission_id}/review")
@@ -273,6 +319,18 @@ def submission_file(submission_id: int):
         ).fetchone()
     if not row or row["status"] not in {"completed", "reviewed"} or not Path(row["source_path"]).exists():
         raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(row["source_path"], filename=row["filename"])
+
+
+@app.get("/api/submissions/{submission_id}/preview")
+def submission_preview(submission_id: int):
+    with db.connect() as connection:
+        row = connection.execute(
+            "SELECT source_path, filename FROM submissions WHERE id = ?",
+            (submission_id,),
+        ).fetchone()
+    if not row or not Path(row["source_path"]).exists():
+        raise HTTPException(status_code=404, detail="作业文件不存在")
     return FileResponse(row["source_path"], filename=row["filename"])
 
 

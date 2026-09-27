@@ -32,6 +32,7 @@ def init_db() -> None:
                 name TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 content TEXT NOT NULL,
+                source_path TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -75,6 +76,11 @@ def init_db() -> None:
             );
             """
         )
+        rubric_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(rubrics)").fetchall()
+        }
+        if "source_path" not in rubric_columns:
+            db.execute("ALTER TABLE rubrics ADD COLUMN source_path TEXT NOT NULL DEFAULT ''")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

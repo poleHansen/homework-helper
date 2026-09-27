@@ -51,10 +51,31 @@ body { margin: 0; min-width: 320px; background: #eef2ed; }
 .ant-modal-content { border-radius: 14px !important; }
 .ant-modal-header { border-radius: 14px 14px 0 0 !important; }
 .ant-modal-footer { display: none; }
+.rubric-list .ant-list-item-extra { margin-inline-start: 12px; }
+.document-preview-modal .ant-modal-body { padding: 0; }
+.document-preview-modal .ant-modal-content { overflow: hidden; }
+.document-preview-modal .ant-modal-header { padding: 20px 24px 14px; }
+.document-preview-modal .ant-modal-header h4 { margin: 4px 0 0; color: #26382f; }
+.preview-loading { display: grid; min-height: 420px; place-items: center; background: #f1f4f0; }
+.preview-loading .ant-spin-text { color: #5c8972; }
+.docx-preview-shell { position: relative; max-height: min(76vh, 900px); overflow: auto; background: #eef2ed; }
+.docx-preview-body { min-height: 460px; }
+.preview-loading-overlay { position: absolute; inset: 0; display: grid; min-height: 460px; place-items: center; background: rgba(238,242,237,.86); }
+.preview-loading-overlay .ant-spin-text { color: #5c8972; }
+.docx-preview-shell .docx-wrapper { padding: 32px 18px 42px; background: #eef2ed; }
+.docx-preview-shell .docx-wrapper > section.docx { margin-bottom: 24px; box-shadow: 0 8px 22px rgba(37,66,50,.16); }
+.preview-pdf { display: block; width: 100%; height: min(76vh, 900px); border: 0; background: #eef2ed; }
+.preview-image-wrap { display: grid; max-height: min(76vh, 900px); place-items: center; overflow: auto; padding: 28px; background: #eef2ed; }
+.preview-image-wrap img { display: block; max-width: 100%; max-height: calc(min(76vh, 900px) - 56px); object-fit: contain; box-shadow: 0 8px 22px rgba(37,66,50,.16); }
+.preview-text { max-height: min(76vh, 900px); margin: 0; overflow: auto; padding: 28px; color: #26382f; background: #fbfcfa; font: 14px/1.8 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
+.document-preview-modal .ant-empty { margin: 0; padding: 80px 24px; background: #fbfcfa; }
 @media (max-width: 800px) {
   .app-header { padding: 0 16px; }
   .app-sider { display: none; }
   .content-wrap { padding: 30px 16px 60px; }
   .page-heading { display: block; }
   .page-heading .ant-statistic { margin-top: 24px; }
+  .document-preview-modal { max-width: calc(100vw - 24px); }
+  .document-preview-modal .ant-modal-body { margin: 0 -1px; }
+  .docx-preview-shell .docx-wrapper { padding: 18px 8px 28px; }
 }

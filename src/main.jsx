@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { renderAsync } from "docx-preview";
 import {
   App,
   Alert,
@@ -17,10 +18,12 @@ import {
   Layout,
   List,
   Modal,
+  Popconfirm,
   Progress,
   Row,
   Select,
   Space,
+  Spin,
   Statistic,
   Table,
   Tag,
@@ -32,6 +35,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
   FileTextOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -52,6 +56,15 @@ const statusText = {
   failed: "处理失败",
   reviewed: "已复核",
 };
+
+function fileType(filename = "") {
+  const suffix = filename.toLowerCase().split(".").pop();
+  if (suffix === "docx") return "docx";
+  if (suffix === "pdf") return "pdf";
+  if (["jpg", "jpeg", "png", "gif", "webp"].includes(suffix)) return "image";
+  if (["txt", "md"].includes(suffix)) return "text";
+  return "unknown";
+}
 
 async function request(url, options = {}) {
   let response;
@@ -85,6 +98,7 @@ function AppShell() {
   const [rubricOpen, setRubricOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTesting, setSettingsTesting] = useState(false);
+  const [previewTarget, setPreviewTarget] = useState(null);
   const [uploadStage, setUploadStage] = useState("");
   const [rubricForm] = Form.useForm();
   const [batchForm] = Form.useForm();
@@ -240,6 +254,29 @@ function AppShell() {
     }
   }
 
+  async function deleteBatch(batchId) {
+    try {
+      await request(`/api/batches/${batchId}`, { method: "DELETE" });
+      if (selectedBatchId.current === batchId) {
+        selectedBatchId.current = null;
+        setSelectedBatch(null);
+      }
+      await loadAll();
+      message.success("批次及其文件已永久删除");
+    } catch (error) {
+      message.error(error.message);
+    }
+  }
+
+  function openRubricPreview(rubric) {
+    setPreviewTarget({
+      title: rubric.name,
+      filename: rubric.source_path || "评分标准.txt",
+      content: rubric.content,
+      url: rubric.source_path ? `/api/rubrics/${rubric.id}/file` : null,
+    });
+  }
+
   const batchColumns = [
     {
       title: "批次",
@@ -259,6 +296,11 @@ function AppShell() {
       title: "状态",
       dataIndex: "status",
       render: (status) => <Tag color={statusColor(status)}>{statusText[status] || status}</Tag>,
+    },
+    {
+      title: "操作",
+      fixed: "right",
+      render: (_, batch) => <BatchDeleteButton batchId={batch.id} onDelete={deleteBatch} />,
     },
   ];
 
@@ -316,6 +358,15 @@ function AppShell() {
                   <List.Item.Meta
                     title={rubric.name}
                     description={rubric.description || "未填写说明"}
+                  />
+                  <Button
+                    type="text"
+                    icon={<EyeOutlined />}
+                    aria-label={`查看${rubric.name}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openRubricPreview(rubric);
+                    }}
                   />
                 </List.Item>
               )}
@@ -401,7 +452,18 @@ function AppShell() {
               <Table rowKey="id" columns={batchColumns} dataSource={batches} pagination={false} locale={{ emptyText: "上传第一批作业后，处理进度会显示在这里" }} />
             </Card>
 
-            {selectedBatch && <BatchDetail batch={selectedBatch} onRefresh={() => openBatch(selectedBatch.id)} />}
+            {selectedBatch && (
+              <BatchDetail
+                batch={selectedBatch}
+                onRefresh={() => openBatch(selectedBatch.id)}
+                onDelete={deleteBatch}
+                onPreview={(item) => setPreviewTarget({
+                  title: item.filename,
+                  filename: item.filename,
+                  url: `/api/submissions/${item.id}/preview`,
+                })}
+              />
+            )}
           </div>
         </Content>
       </Layout>
@@ -471,11 +533,143 @@ function AppShell() {
           </Flex>
         </Form>
       </Modal>
+      <DocumentPreview target={previewTarget} onClose={() => setPreviewTarget(null)} />
     </Layout>
   );
 }
 
-function BatchDetail({ batch, onRefresh }) {
+function DocumentPreview({ target, onClose }) {
+  const bodyRef = useRef(null);
+  const stylesRef = useRef(null);
+  const [preview, setPreview] = useState({ loading: false, type: null, source: "", error: "" });
+
+  useEffect(() => {
+    if (!target) return undefined;
+
+    let disposed = false;
+    let objectUrl = "";
+    const type = fileType(target.filename);
+
+    setPreview({ loading: true, type, source: "", error: "" });
+    if (bodyRef.current) bodyRef.current.replaceChildren();
+    if (stylesRef.current) stylesRef.current.replaceChildren();
+
+    async function loadPreview() {
+      try {
+        if (type === "text" && target.content != null && !target.url) {
+          if (!disposed) setPreview({ loading: false, type, source: target.content, error: "" });
+          return;
+        }
+
+        const response = await fetch(target.url);
+        if (!response.ok) {
+          throw new Error("无法读取文件");
+        }
+        const blob = await response.blob();
+
+        if (type === "docx") {
+          if (disposed || !bodyRef.current || !stylesRef.current) return;
+          await renderAsync(
+            await blob.arrayBuffer(),
+            bodyRef.current,
+            stylesRef.current,
+            {
+              breakPages: true,
+              renderHeaders: true,
+              renderFooters: true,
+              renderFootnotes: true,
+              renderEndnotes: true,
+            },
+          );
+          if (!disposed) setPreview({ loading: false, type, source: "", error: "" });
+          return;
+        }
+
+        if (type === "text") {
+          const source = await blob.text();
+          if (!disposed) setPreview({ loading: false, type, source, error: "" });
+          return;
+        }
+
+        objectUrl = URL.createObjectURL(blob);
+        if (!disposed) setPreview({ loading: false, type, source: objectUrl, error: "" });
+      } catch (error) {
+        if (!disposed) {
+          setPreview({ loading: false, type, source: "", error: error.message || "文件预览失败" });
+        }
+      }
+    }
+
+    loadPreview();
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [target]);
+
+  function renderContent() {
+    if (preview.error) {
+      return <Alert type="error" showIcon message="文件预览失败" description={preview.error} />;
+    }
+    if (preview.type === "docx") {
+      return (
+        <div className="docx-preview-shell">
+          <div ref={stylesRef} />
+          <div ref={bodyRef} className="docx-preview-body" />
+          {preview.loading && (
+            <div className="preview-loading-overlay">
+              <Spin size="large" tip="正在加载文件" />
+            </div>
+          )}
+        </div>
+      );
+    }
+    if (preview.loading) {
+      return <div className="preview-loading"><Spin size="large" tip="正在加载文件" /></div>;
+    }
+    if (preview.type === "pdf") {
+      return <iframe className="preview-pdf" title={target?.title} src={preview.source} />;
+    }
+    if (preview.type === "image") {
+      return <div className="preview-image-wrap"><img src={preview.source} alt={target?.title} /></div>;
+    }
+    if (preview.type === "text") {
+      return <pre className="preview-text">{preview.source}</pre>;
+    }
+    return <Empty description="暂不支持在线预览，请下载原文件查看" />;
+  }
+
+  return (
+    <Modal
+      className="document-preview-modal"
+      title={<div><Text type="secondary">文件预览</Text><Title level={4}>{target?.title}</Title></div>}
+      open={Boolean(target)}
+      onCancel={onClose}
+      footer={null}
+      width={1080}
+      destroyOnHidden
+    >
+      {renderContent()}
+    </Modal>
+  );
+}
+
+function BatchDeleteButton({ batchId, onDelete }) {
+  return (
+    <Popconfirm
+      title="永久删除这个批次？"
+      description="批次记录、所有作业文件和批改结果都会被真实删除，无法恢复。"
+      okText="永久删除"
+      cancelText="取消"
+      okButtonProps={{ danger: true }}
+      onConfirm={() => onDelete(batchId)}
+    >
+      <Button type="link" danger icon={<DeleteOutlined />}>删除</Button>
+    </Popconfirm>
+  );
+}
+
+function BatchDetail({ batch, onRefresh, onDelete, onPreview }) {
   const { message } = App.useApp();
   const errors = batch.summary?.common_errors || [];
   const [reviewing, setReviewing] = useState(null);
@@ -522,6 +716,13 @@ function BatchDetail({ batch, onRefresh }) {
         <Space>
           <Button
             type="link"
+            icon={<EyeOutlined />}
+            onClick={() => onPreview(item)}
+          >
+            查看
+          </Button>
+          <Button
+            type="link"
             icon={<EditOutlined />}
             disabled={!["completed", "reviewed"].includes(item.status)}
             onClick={() => openReview(item)}
@@ -555,6 +756,7 @@ function BatchDetail({ batch, onRefresh }) {
           >
             全部下载
           </Button>
+          <BatchDeleteButton batchId={batch.id} onDelete={onDelete} />
           <Tag color={statusColor(batch.status)}>{statusText[batch.status] || batch.status}</Tag>
         </Space>
       </Flex>
