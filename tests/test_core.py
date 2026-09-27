@@ -160,6 +160,42 @@ def test_init_db_migrates_rubric_source_path(tmp_path, monkeypatch):
     assert "source_path" in columns
 
 
+def test_delete_rubric_removes_file_and_record_preserves_batch(tmp_path, monkeypatch):
+    database = tmp_path / "homework.db"
+    monkeypatch.setattr(db, "DATABASE_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    db.init_db()
+
+    timestamp = db.now()
+    rubric_path = tmp_path / "rubrics" / "1.txt"
+    rubric_path.parent.mkdir()
+    rubric_path.write_text("满分 10 分", encoding="utf-8")
+    with db.connect() as connection:
+        rubric_id = connection.execute(
+            """
+            INSERT INTO rubrics
+            (name, content, source_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("测试标准", "满分 10 分", str(rubric_path), timestamp, timestamp),
+        ).lastrowid
+        batch_id = connection.execute(
+            """
+            INSERT INTO batches
+            (name, rubric_id, rubric_snapshot, status, created_at, updated_at)
+            VALUES (?, ?, ?, 'completed', ?, ?)
+            """,
+            ("测试批次", rubric_id, "满分 10 分", timestamp, timestamp),
+        ).lastrowid
+
+    assert main.delete_rubric(rubric_id) == {"status": "deleted"}
+    assert not rubric_path.exists()
+    with db.connect() as connection:
+        assert connection.execute("SELECT 1 FROM rubrics WHERE id = ?", (rubric_id,)).fetchone() is None
+        assert connection.execute("SELECT 1 FROM batches WHERE id = ?", (batch_id,)).fetchone() is not None
+    assert main.list_batches()[0]["rubric_name"] == "评分标准已删除"
+
+
 def test_delete_batch_removes_records_and_files(tmp_path, monkeypatch):
     database = tmp_path / "homework.db"
     upload_dir = tmp_path / "uploads"

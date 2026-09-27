@@ -82,6 +82,25 @@ def rubric_file(rubric_id: int):
     return FileResponse(row["source_path"])
 
 
+@app.delete("/api/rubrics/{rubric_id}")
+def delete_rubric(rubric_id: int):
+    with db.connect() as connection:
+        row = connection.execute(
+            "SELECT source_path FROM rubrics WHERE id = ?",
+            (rubric_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="评分标准不存在")
+        source_path = Path(row["source_path"]) if row["source_path"] else None
+        if source_path and source_path.exists():
+            try:
+                source_path.unlink()
+            except OSError as error:
+                raise HTTPException(status_code=500, detail=f"删除评分标准文件失败：{error}") from error
+        connection.execute("DELETE FROM rubrics WHERE id = ?", (rubric_id,))
+    return {"status": "deleted"}
+
+
 @app.get("/api/settings/model")
 def get_model_settings():
     return public_model_settings()
@@ -161,8 +180,8 @@ def list_batches():
     with db.connect() as connection:
         rows = connection.execute(
             """
-            SELECT batches.*, rubrics.name AS rubric_name
-            FROM batches JOIN rubrics ON rubrics.id = batches.rubric_id
+            SELECT batches.*, COALESCE(rubrics.name, '评分标准已删除') AS rubric_name
+            FROM batches LEFT JOIN rubrics ON rubrics.id = batches.rubric_id
             ORDER BY batches.created_at DESC
             """
         ).fetchall()
@@ -174,8 +193,8 @@ def get_batch(batch_id: int):
     with db.connect() as connection:
         batch = connection.execute(
             """
-            SELECT batches.*, rubrics.name AS rubric_name
-            FROM batches JOIN rubrics ON rubrics.id = batches.rubric_id
+            SELECT batches.*, COALESCE(rubrics.name, '评分标准已删除') AS rubric_name
+            FROM batches LEFT JOIN rubrics ON rubrics.id = batches.rubric_id
             WHERE batches.id = ?
             """,
             (batch_id,),

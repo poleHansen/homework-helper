@@ -57,6 +57,26 @@ const statusText = {
   reviewed: "已复核",
 };
 
+const statusColorMap = {
+  extracting: "processing",
+  queued: "default",
+  grading: "processing",
+  completed: "success",
+  completed_with_errors: "warning",
+  failed: "error",
+  reviewed: "success",
+};
+
+const statusDescription = {
+  extracting: "正在准备文件",
+  queued: "等待进入批改队列",
+  grading: "模型正在逐份处理",
+  completed: "全部作业已完成",
+  completed_with_errors: "部分作业处理失败",
+  failed: "批次处理失败",
+  reviewed: "教师已完成复核",
+};
+
 function fileType(filename = "") {
   const suffix = filename.toLowerCase().split(".").pop();
   if (suffix === "docx") return "docx";
@@ -82,10 +102,7 @@ async function request(url, options = {}) {
 }
 
 function statusColor(status) {
-  if (status === "completed" || status === "reviewed") return "success";
-  if (status === "failed" || status === "completed_with_errors") return "error";
-  if (status === "grading" || status === "extracting") return "processing";
-  return "default";
+  return statusColorMap[status] || "default";
 }
 
 function AppShell() {
@@ -100,6 +117,11 @@ function AppShell() {
   const [settingsTesting, setSettingsTesting] = useState(false);
   const [previewTarget, setPreviewTarget] = useState(null);
   const [uploadStage, setUploadStage] = useState("");
+  const [view, setView] = useState("home");
+  const [rubricSearch, setRubricSearch] = useState("");
+  const [batchSearch, setBatchSearch] = useState("");
+  const [offline, setOffline] = useState(!navigator.onLine);
+  const [loadError, setLoadError] = useState("");
   const [rubricForm] = Form.useForm();
   const [batchForm] = Form.useForm();
   const [settingsForm] = Form.useForm();
@@ -107,28 +129,37 @@ function AppShell() {
   const selectedBatchId = useRef(null);
 
   async function loadAll() {
-    const [nextRubrics, nextBatches, nextSettings] = await Promise.all([
-      request("/api/rubrics"),
-      request("/api/batches"),
-      request("/api/settings/model"),
-    ]);
-    setRubrics(nextRubrics);
-    setBatches(nextBatches);
-    setModelSettings(nextSettings);
-    setSelectedRubric((current) => {
-      const next = current && nextRubrics.some((rubric) => rubric.id === current)
-        ? current
-        : nextRubrics[0]?.id || null;
-      if (!batchForm.getFieldValue("rubric_id")) {
-        batchForm.setFieldValue("rubric_id", next);
-      }
-      return next;
-    });
+    try {
+      const [nextRubrics, nextBatches, nextSettings] = await Promise.all([
+        request("/api/rubrics"),
+        request("/api/batches"),
+        request("/api/settings/model"),
+      ]);
+      setRubrics(nextRubrics);
+      setBatches(nextBatches);
+      setModelSettings(nextSettings);
+      setOffline(false);
+      setLoadError("");
+      setSelectedRubric((current) => {
+        const next = current && nextRubrics.some((rubric) => rubric.id === current)
+          ? current
+          : nextRubrics[0]?.id || null;
+        if (!batchForm.getFieldValue("rubric_id")) {
+          batchForm.setFieldValue("rubric_id", next);
+        }
+        return next;
+      });
+    } catch (error) {
+      setOffline(true);
+      setLoadError(error.message);
+      throw error;
+    }
   }
 
   async function openBatch(batchId) {
     selectedBatchId.current = batchId;
     setSelectedBatch(await request(`/api/batches/${batchId}`));
+    setView("detail");
   }
 
   useEffect(() => {
@@ -137,7 +168,7 @@ function AppShell() {
       try {
         await loadAll();
         if (!disposed && selectedBatchId.current) {
-          await openBatch(selectedBatchId.current);
+          setSelectedBatch(await request(`/api/batches/${selectedBatchId.current}`));
         }
       } catch (error) {
         if (!disposed) message.error(error.message);
@@ -145,8 +176,25 @@ function AppShell() {
     }
     refresh();
     const timer = setInterval(() => refresh(), 3000);
-    return () => clearInterval(timer);
+    const handleOnline = () => { setOffline(false); refresh(); };
+    const handleOffline = () => setOffline(true);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
   }, []);
+
+  const filteredRubrics = rubrics.filter((rubric) =>
+    `${rubric.name} ${rubric.description}`.toLowerCase().includes(rubricSearch.trim().toLowerCase())
+  );
+  const filteredBatches = batches.filter((batch) =>
+    `${batch.name} ${batch.rubric_name} ${statusText[batch.status] || batch.status}`
+      .toLowerCase()
+      .includes(batchSearch.trim().toLowerCase())
+  );
 
   async function openSettings() {
     try {
@@ -260,9 +308,31 @@ function AppShell() {
       if (selectedBatchId.current === batchId) {
         selectedBatchId.current = null;
         setSelectedBatch(null);
+        setView("home");
       }
       await loadAll();
       message.success("批次及其文件已永久删除");
+    } catch (error) {
+      message.error(error.message);
+    }
+  }
+
+  function goHome() {
+    selectedBatchId.current = null;
+    setSelectedBatch(null);
+    setView("home");
+  }
+
+  async function deleteRubric(rubric) {
+    try {
+      await request(`/api/rubrics/${rubric.id}`, { method: "DELETE" });
+      const nextRubric = rubrics.find((item) => item.id !== rubric.id);
+      if (selectedRubric === rubric.id) {
+        setSelectedRubric(nextRubric?.id || null);
+        batchForm.setFieldValue("rubric_id", nextRubric?.id);
+      }
+      await loadAll();
+      message.success("评分标准及其文件已永久删除");
     } catch (error) {
       message.error(error.message);
     }
@@ -326,17 +396,26 @@ function AppShell() {
       <Layout>
         <Sider width={292} className="app-sider">
           <div className="sider-inner">
-            <Flex justify="space-between" align="center" className="sider-title">
+               <Flex justify="space-between" align="center" className="sider-title">
               <div>
                 <Text type="secondary">评分标准</Text>
                 <Title level={5}>标准库</Title>
               </div>
               <Button type="primary" shape="circle" icon={<PlusOutlined />} onClick={() => setRubricOpen(true)} />
-            </Flex>
-            <List
-              className="rubric-list"
-              dataSource={rubrics}
-              locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有评分标准" /> }}
+               </Flex>
+             <Input
+               allowClear
+               size="small"
+               prefix={<FileTextOutlined />}
+               placeholder="搜索评分标准"
+               value={rubricSearch}
+               onChange={(event) => setRubricSearch(event.target.value)}
+               className="sidebar-search"
+             />
+             <List
+               className="rubric-list"
+               dataSource={filteredRubrics}
+               locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有评分标准" /> }}
               renderItem={(rubric) => (
                 <List.Item
                   className={selectedRubric === rubric.id ? "rubric-item rubric-item-active" : "rubric-item"}
@@ -368,6 +447,22 @@ function AppShell() {
                       openRubricPreview(rubric);
                     }}
                   />
+                  <Popconfirm
+                    title="永久删除这个评分标准？"
+                    description="评分标准记录和原始文件都会被真实删除，历史批次和批改结果会保留。"
+                    okText="永久删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => deleteRubric(rubric)}
+                  >
+                    <Button
+                      type="text"
+                      danger
+                      icon={<DeleteOutlined />}
+                      aria-label={`删除${rubric.name}`}
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </Popconfirm>
                 </List.Item>
               )}
             />
@@ -384,87 +479,109 @@ function AppShell() {
           </div>
         </Sider>
         <Content className="app-content">
-          <div className="content-wrap">
-            <div className="page-heading">
-              <div>
-                <Text className="eyebrow">今日工作台</Text>
-                <Title>让批改结果，直接变成教学反馈。</Title>
-                <Paragraph type="secondary">选择评分标准，上传全班作业，系统会逐份处理并整理共性问题。</Paragraph>
-              </div>
-              <Statistic title="批次总数" value={batches.length} suffix="个" />
-            </div>
-
-            <Card className="upload-card" bordered={false}>
-              <Flex justify="space-between" align="start" className="card-heading">
-                <div>
-                  <Text className="eyebrow">新建批次</Text>
-                  <Title level={4}>上传全班作业</Title>
-                </div>
-                <Tag icon={<CloudUploadOutlined />}>DOCX 压缩包</Tag>
-              </Flex>
-              <Form form={batchForm} layout="vertical" onFinish={createBatch}>
-                {uploadStage && <Alert type={uploadStage.startsWith("建立批次失败") ? "error" : "info"} showIcon message={uploadStage} style={{ marginBottom: 18 }} />}
-                <Row gutter={18}>
-                  <Col xs={24} md={12}>
-                    <Form.Item label="批次名称" name="name" rules={[{ required: true, message: "请输入批次名称" }]}>
-                      <Input size="large" placeholder="例如：高一数学 · 函数单元练习" />
-                    </Form.Item>
-                  </Col>
-                  <Col xs={24} md={12}>
-                    <Form.Item label="使用评分标准" name="rubric_id" rules={[{ required: true, message: "请选择评分标准" }]}>
-                      <Select
-                        size="large"
-                        placeholder="选择一套评分标准"
-                        onChange={setSelectedRubric}
+          <div className={`content-wrap ${view === "detail" ? "content-wrap-detail" : ""}`}>
+            {view === "home" ? (
+              <>
+                <div className="workspace-stack">
+                  <Card className="upload-card" bordered={false}>
+                    <Flex justify="space-between" align="start" className="card-heading">
+                      <div>
+                        <Text className="eyebrow">新建批次</Text>
+                        <Title level={4}>上传全班作业</Title>
+                      </div>
+                      <Tag icon={<CloudUploadOutlined />}>DOCX 压缩包</Tag>
+                    </Flex>
+                    <Form form={batchForm} layout="vertical" onFinish={createBatch}>
+                      {uploadStage && <Alert type={uploadStage.startsWith("建立批次失败") ? "error" : "info"} showIcon message={uploadStage} style={{ marginBottom: 18 }} />}
+                      <Row gutter={18}>
+                        <Col xs={24} md={12}>
+                          <Form.Item label="批次名称" name="name" rules={[{ required: true, message: "请输入批次名称" }]}>
+                            <Input size="large" placeholder="例如：高一数学 · 函数单元练习" />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={12}>
+                          <Form.Item label="使用评分标准" name="rubric_id" rules={[{ required: true, message: "请选择评分标准" }]}>
+                            <Select
+                              size="large"
+                              placeholder="选择一套评分标准"
+                              onChange={setSelectedRubric}
+                            >
+                              {rubrics.map((rubric) => <Select.Option key={rubric.id} value={rubric.id}>{rubric.name}</Select.Option>)}
+                            </Select>
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Form.Item
+                        name="archive"
+                        label="作业压缩包"
+                        valuePropName="fileList"
+                        getValueFromEvent={(event) => event?.fileList || []}
+                        rules={[{ required: true, message: "请选择 ZIP 文件" }]}
                       >
-                        {rubrics.map((rubric) => <Select.Option key={rubric.id} value={rubric.id}>{rubric.name}</Select.Option>)}
-                      </Select>
-                    </Form.Item>
-                  </Col>
-                </Row>
-                <Form.Item
-                  name="archive"
-                  label="作业压缩包"
-                  valuePropName="fileList"
-                  getValueFromEvent={(event) => event?.fileList || []}
-                  rules={[{ required: true, message: "请选择 ZIP 文件" }]}
-                >
-                  <Upload.Dragger accept=".zip" maxCount={1} beforeUpload={() => false} showUploadList>
-                    <p className="ant-upload-drag-icon"><CloudUploadOutlined /></p>
-                    <p className="ant-upload-text">点击或拖拽 ZIP 文件到这里</p>
-                  <p className="ant-upload-hint">压缩包内请放入每位学生的一份 DOCX 作业</p>
-                  </Upload.Dragger>
-                </Form.Item>
-                <Button type="primary" htmlType="submit" size="large" icon={<UploadOutlined />} loading={loading}>
-                  开始建立批次
-                </Button>
-              </Form>
-            </Card>
+                        <Upload.Dragger accept=".zip" maxCount={1} beforeUpload={() => false} showUploadList>
+                          <p className="ant-upload-drag-icon"><CloudUploadOutlined /></p>
+                          <p className="ant-upload-text">点击或拖拽 ZIP 文件到这里</p>
+                          <p className="ant-upload-hint">压缩包内请放入每位学生的一份 DOCX 作业</p>
+                        </Upload.Dragger>
+                      </Form.Item>
+                      <Button type="primary" htmlType="submit" size="large" icon={<UploadOutlined />} loading={loading}>
+                        开始建立批次
+                      </Button>
+                    </Form>
+                  </Card>
 
-            <Card className="table-card" bordered={false}>
-              <Flex justify="space-between" align="center" className="card-heading">
-                <div>
-                  <Text className="eyebrow">批改记录</Text>
-                  <Title level={4}>最近批次</Title>
+                  <Card className="table-card recent-batches-card" bordered={false}>
+                    <Flex justify="space-between" align="center" className="card-heading">
+                      <div>
+                        <Text className="eyebrow">批改记录</Text>
+                        <Title level={4}>最近批次</Title>
+                      </div>
+                      <Space>
+                        <Input
+                          allowClear
+                           prefix={<FileTextOutlined />}
+                          placeholder="搜索批次、评分标准或状态"
+                          value={batchSearch}
+                          onChange={(event) => setBatchSearch(event.target.value)}
+                          className="batch-search"
+                        />
+                        <Button icon={<ReloadOutlined />} onClick={loadAll}>刷新</Button>
+                      </Space>
+                    </Flex>
+                    <div className="recent-batches-scroll">
+                      <Table rowKey="id" columns={batchColumns} dataSource={filteredBatches} pagination={false} locale={{ emptyText: batchSearch ? "没有匹配的批次" : "上传第一批作业后，处理进度会显示在这里" }} />
+                    </div>
+                  </Card>
                 </div>
-                <Button icon={<ReloadOutlined />} onClick={loadAll}>刷新</Button>
-              </Flex>
-              <Table rowKey="id" columns={batchColumns} dataSource={batches} pagination={false} locale={{ emptyText: "上传第一批作业后，处理进度会显示在这里" }} />
-            </Card>
-
-            {selectedBatch && (
+              </>
+            ) : selectedBatch ? (
               <BatchDetail
                 batch={selectedBatch}
+                onBack={goHome}
                 onRefresh={() => openBatch(selectedBatch.id)}
-                onDelete={deleteBatch}
+                onDelete={() => {
+                  goHome();
+                  loadAll();
+                }}
                 onPreview={(item) => setPreviewTarget({
                   title: item.filename,
                   filename: item.filename,
                   url: `/api/submissions/${item.id}/preview`,
                 })}
               />
-            )}
+            ) : <Empty description="正在加载批次详情" />}
           </div>
+          {offline && (
+            <div className="offline-banner">
+              <Alert
+                type={loadError ? "error" : "warning"}
+                showIcon
+                message={loadError ? "工作台暂时无法加载数据" : "当前处于离线状态"}
+                description={loadError || "已有内容仍可查看，恢复连接后会自动同步。"}
+                action={<Button size="small" onClick={loadAll}>重试</Button>}
+              />
+            </div>
+          )}
         </Content>
       </Layout>
 
@@ -669,7 +786,7 @@ function BatchDeleteButton({ batchId, onDelete }) {
   );
 }
 
-function BatchDetail({ batch, onRefresh, onDelete, onPreview }) {
+function BatchDetail({ batch, onBack, onRefresh, onDelete, onPreview }) {
   const { message } = App.useApp();
   const errors = batch.summary?.common_errors || [];
   const [reviewing, setReviewing] = useState(null);
@@ -745,6 +862,9 @@ function BatchDetail({ batch, onRefresh, onDelete, onPreview }) {
     <Card className="detail-card" bordered={false}>
       <Flex justify="space-between" align="center" className="card-heading">
         <div>
+          <Button type="link" icon={<ReloadOutlined />} onClick={onBack} className="detail-back-button">
+            返回批次列表
+          </Button>
           <Text className="eyebrow">批次详情</Text>
           <Title level={4}>{batch.name}</Title>
         </div>
